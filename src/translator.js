@@ -28,18 +28,12 @@ function parseJson(text) {
 }
 
 async function findComposer(page, timeoutMs = 120000) {
-  const selectors = [
-    'textarea',
-    '[contenteditable="true"]',
-    'div[role="textbox"]'
-  ];
+  const selectors = ['textarea', '[contenteditable="true"]', 'div[role="textbox"]'];
   const started = Date.now();
-
   while (Date.now() - started < timeoutMs) {
     for (const selector of selectors) {
       const loc = page.locator(selector);
       const count = await loc.count().catch(() => 0);
-      if (!count) continue;
       for (let i = count - 1; i >= 0; i--) {
         const item = loc.nth(i);
         if (await item.isVisible().catch(() => false)) return item;
@@ -47,7 +41,6 @@ async function findComposer(page, timeoutMs = 120000) {
     }
     await page.waitForTimeout(500);
   }
-
   throw new Error(`Could not find the ChatGPT message composer after ${Math.round(timeoutMs / 1000)} seconds. Check that ChatGPT is loaded and you are signed in.`);
 }
 
@@ -58,8 +51,7 @@ async function sendMessage(page, prompt) {
 
   const sendSelectors = [
     'button[aria-label*="Send"]',
-    'button[data-testid*="send"]',
-    'button:has(svg)'
+    'button[data-testid*="send"]'
   ];
   for (const selector of sendSelectors) {
     const loc = page.locator(selector);
@@ -67,14 +59,11 @@ async function sendMessage(page, prompt) {
     for (let i = count - 1; i >= 0; i--) {
       const button = loc.nth(i);
       if (await button.isVisible().catch(() => false) && await button.isEnabled().catch(() => false)) {
-        const aria = await button.getAttribute('aria-label').catch(() => '');
-        if (selector === 'button:has(svg)' && !String(aria || '').toLowerCase().includes('send')) continue;
         await button.click();
         return;
       }
     }
   }
-
   await composer.press('Enter');
 }
 
@@ -85,36 +74,74 @@ async function assistantMessages(page) {
   ];
   for (const selector of selectors) {
     const loc = page.locator(selector);
-    const count = await loc.count();
+    const count = await loc.count().catch(() => 0);
     if (count) return loc;
   }
   return page.locator('main article');
 }
 
-async function waitForAssistantResponse(page, beforeCount, timeoutMs, onProgress) {
+async function isGenerating(page) {
+  const selectors = [
+    'button[aria-label*="Stop generating"]',
+    'button[aria-label*="Stop"]',
+    'button[data-testid*="stop"]'
+  ];
+  for (const selector of selectors) {
+    const loc = page.locator(selector);
+    const count = await loc.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      if (await loc.nth(i).isVisible().catch(() => false)) return true;
+    }
+  }
+  return false;
+}
+
+async function waitForAssistantResponse(page, beforeCount, beforeLastText, timeoutMs, onProgress, log) {
   const started = Date.now();
-  let lastText = '';
+  let lastText = beforeLastText || '';
   let stableSince = 0;
+  let lastDiagnostic = 0;
+
   while (Date.now() - started < timeoutMs) {
     const messages = await assistantMessages(page);
     const count = await messages.count().catch(() => 0);
-    if (count > beforeCount) {
-      const latest = messages.nth(count - 1);
-      const text = (await latest.innerText().catch(() => '')).trim();
-      if (text) {
-        if (text === lastText) {
-          if (!stableSince) stableSince = Date.now();
-          if (Date.now() - stableSince >= 1200) return text;
-        } else {
-          lastText = text;
-          stableSince = Date.now();
-        }
-        onProgress?.(Math.min(99, Math.max(1, Math.round((Date.now() - started) / timeoutMs * 100))));
+    const latest = count ? messages.nth(count - 1) : null;
+    const text = latest ? (await latest.innerText().catch(() => '')).trim() : '';
+    const generating = await isGenerating(page);
+
+    // ChatGPT sometimes reuses the same DOM node instead of creating a new
+    // assistant-message element. Therefore count alone is not a reliable
+    // completion signal. Accept either a new assistant node OR changed text.
+    const isNewMessage = count > beforeCount;
+    const textChanged = Boolean(text) && text !== beforeLastText;
+
+    if (isNewMessage || textChanged) {
+      if (text && text === lastText && !generating) {
+        if (!stableSince) stableSince = Date.now();
+        if (Date.now() - stableSince >= 1800) return text;
+      } else if (text !== lastText) {
+        lastText = text;
+        stableSince = generating ? 0 : Date.now();
       }
+      onProgress?.(Math.min(99, Math.max(1, Math.round((Date.now() - started) / timeoutMs * 100))));
     }
+
+    // Give visible diagnostics every 15 seconds so a stalled page is
+    // distinguishable from a response that is still being generated.
+    const elapsed = Date.now() - started;
+    if (elapsed - lastDiagnostic >= 15000) {
+      lastDiagnostic = elapsed;
+      log?.(`Response monitor: assistant messages=${count}, latest chars=${text.length.toLocaleString()}, generating=${generating ? 'yes' : 'no'}, elapsed=${Math.round(elapsed / 1000)}s.`);
+    }
+
     await page.waitForTimeout(500);
   }
-  throw new Error(`Timed out waiting for ChatGPT response after ${Math.round(timeoutMs / 1000)} seconds.`);
+
+  const messages = await assistantMessages(page);
+  const count = await messages.count().catch(() => 0);
+  const latest = count ? (await messages.nth(count - 1).innerText().catch(() => '')).trim() : '';
+  const generating = await isGenerating(page);
+  throw new Error(`Timed out waiting for ChatGPT response after ${Math.round(timeoutMs / 1000)} seconds. Diagnostics: assistant messages=${count}, latest chars=${latest.length.toLocaleString()}, generating=${generating ? 'yes' : 'no'}.`);
 }
 
 export class ChatGPTBrowser {
@@ -131,20 +158,13 @@ export class ChatGPTBrowser {
   async connect() {
     this.log('Starting ChatGPT browser automation…');
     this.log(`Using persistent browser profile: ${this.profileDir}`);
-
     this.context = await chromium.launchPersistentContext(this.profileDir, {
       headless: this.headless,
       viewport: { width: 1440, height: 1000 },
       args: ['--disable-blink-features=AutomationControlled']
     });
-
     this.browser = this.context.browser();
     this.page = this.context.pages()[0] || await this.context.newPage();
-
-    // Do not wait for DOMContentLoaded here. ChatGPT can keep loading network
-    // resources for a long time, which caused a false startup failure even
-    // though the page was already usable. `commit` only waits for navigation
-    // to be committed, after which we independently wait for the composer.
     this.log('Opening ChatGPT…');
     try {
       await this.page.goto(CHATGPT_URL, {waitUntil: 'commit', timeout: 30000});
@@ -152,25 +172,15 @@ export class ChatGPTBrowser {
     } catch (error) {
       if (/timeout/i.test(String(error?.message || error))) {
         this.log('Initial navigation timed out, but the browser may still be loading ChatGPT. Continuing to wait for the page…');
-      } else {
-        throw error;
-      }
+      } else throw error;
     }
-
     await this.page.waitForTimeout(2000);
     this.log(`Current ChatGPT URL: ${this.page.url()}`);
-
     if (/auth|login/i.test(this.page.url())) {
       this.log('ChatGPT is not signed in. Sign in in the opened browser window; automation will wait up to 5 minutes.');
-      try {
-        await this.page.waitForURL(/chatgpt\.com\/(?!auth|login)/i, {timeout: 300000});
-      } catch {
-        // The URL can remain unchanged after authentication while the app
-        // becomes usable, so composer detection below is the real readiness check.
-      }
+      try { await this.page.waitForURL(/chatgpt\.com\/(?!auth|login)/i, {timeout: 300000}); } catch {}
       this.log(`URL after sign-in wait: ${this.page.url()}`);
     }
-
     this.log('Waiting for the ChatGPT message composer…');
     await findComposer(this.page, 120000);
     this.log('ChatGPT composer detected. Ready.');
@@ -182,11 +192,12 @@ export class ChatGPTBrowser {
 
     const messages = await assistantMessages(this.page);
     const beforeCount = await messages.count().catch(() => 0);
+    const beforeLatest = beforeCount ? (await messages.nth(beforeCount - 1).innerText().catch(() => '')).trim() : '';
     this.log(`Page ${pageNumber}/${totalPages}: sending ${units.length} units in ONE batch…`);
     await sendMessage(this.page, prompt);
-    const response = await waitForAssistantResponse(this.page, beforeCount, this.timeoutMs, p => {
+    const response = await waitForAssistantResponse(this.page, beforeCount, beforeLatest, this.timeoutMs, p => {
       if (p % 10 === 0) this.log(`Page ${pageNumber}/${totalPages}: waiting for ChatGPT response (${p}%)…`);
-    });
+    }, this.log);
     this.log(`Page ${pageNumber}/${totalPages}: response received (${response.length.toLocaleString()} chars).`);
     const pairs = parseJson(response);
     if (!Array.isArray(pairs)) throw new Error(`Page ${pageNumber}: ChatGPT did not return a JSON array.`);
