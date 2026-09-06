@@ -11,6 +11,9 @@ const clearLogs=document.querySelector('#clearLogs');
 const progressText=document.querySelector('#progressText');
 const progressPercent=document.querySelector('#progressPercent');
 const progressBar=document.querySelector('#progressBar');
+const liveResult=document.querySelector('#liveResult');
+const liveOutput=document.querySelector('#liveOutput');
+const livePages=document.querySelector('#livePages');
 const result=document.querySelector('#result');
 const output=document.querySelector('#output');
 const validation=document.querySelector('#validation');
@@ -29,7 +32,10 @@ function setProgress(done,total,current){
   progressPercent.textContent=`${pct}%`;
   progressBar.style.width=`${pct}%`;
 }
-function resetResult(){output.textContent='';validation.textContent='';result.classList.add('hidden');download.disabled=true;outputText='';}
+function resetResult(){
+  output.textContent=''; validation.textContent=''; result.classList.add('hidden'); download.disabled=true; outputText='';
+  liveOutput.textContent=''; livePages.textContent='0 pages compiled'; liveResult.classList.add('hidden');
+}
 
 fileEl.addEventListener('change', async()=>{
   const file=fileEl.files[0]; if(!file)return;
@@ -61,13 +67,24 @@ btn.addEventListener('click',async()=>{
 
 function handleEvent(e){
   if(e.message) log(e.message);
-  if(e.type==='page-start') setProgress(e.completed,e.total,e.page);
-  if(e.type==='page-done') setProgress(e.completed,e.total,e.page);
+  if(e.type==='page-start'){
+    setProgress(e.completed,e.total,e.page);
+    status.textContent=`Translating page ${e.page} of ${e.total} in ChatGPT…`;
+  }
+  if(e.type==='page-done'){
+    setProgress(e.completed,e.total,e.page);
+    if(typeof e.compiledOutput==='string'){
+      liveOutput.textContent=e.compiledOutput;
+      livePages.textContent=`${e.completed} / ${e.total} pages compiled`;
+      liveResult.classList.remove('hidden');
+      liveOutput.scrollTop=liveOutput.scrollHeight;
+    }
+    status.textContent=`Page ${e.page} translated. Compiled file updated live.`;
+  }
   if(e.type==='complete' || e.type==='error'){
     stopBtn.disabled=true; btn.disabled=false;
     if(e.type==='complete'){
       status.textContent='Translation complete and validation passed.';
-      outputText=e.validation?.ok ? (document.querySelector('#output').textContent || '') : '';
       fetch(`/api/jobs/${jobId}`).then(r=>r.json()).then(showResult);
     } else status.textContent=e.message;
     eventSource?.close();
@@ -81,6 +98,9 @@ async function showResult(data){
   validation.className=data.validation?.ok?'ok':'err';
   validation.textContent=data.validation?.ok?'✓ Validation passed: page markers, Sanskrit source, order, unit count, and verse numbers were preserved.':'⚠ '+(data.validation?.errors||[]).join(' ');
   setProgress(data.completedPages,data.totalPages,data.currentPage);
+  liveOutput.textContent=data.output;
+  livePages.textContent=`${data.completedPages} / ${data.totalPages} pages compiled`;
+  liveResult.classList.remove('hidden');
 }
 
 stopBtn.addEventListener('click',async()=>{
