@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sanskrit Text Translator</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<main>
+  <header><h1>Sanskrit Text Translator</h1><p>Page-by-page Sanskrit OCR → English using your logged-in ChatGPT session</p></header>
+
+  <section class="card">
+    <label class="drop"><input id="file" type="file" accept=".txt,text/plain"><span id="fileName">Choose a Sanskrit .txt file</span></label>
+    <div class="controls">
+      <button id="translate" disabled>Start Translation</button>
+      <button id="stop" class="secondary" disabled>Stop</button>
+    </div>
+    <div id="status" class="status">Select a TXT file to begin.</div>
+  </section>
+
+  <section class="card hidden" id="preview">
+    <div class="stats" id="stats"></div>
+    <div class="progressWrap"><div class="progressTop"><span id="progressText">0 / 0 pages</span><span id="progressPercent">0%</span></div><div class="progress"><div id="progressBar"></div></div></div>
+  </section>
+
+  <section class="card hidden" id="logCard">
+    <div class="sectionHead"><h2>Live logs</h2><button id="clearLogs" class="secondary">Clear</button></div>
+    <pre id="logs" class="logs"></pre>
+  </section>
+
+  <section class="card hidden" id="result">
+    <div class="resultHead"><h2>Translation</h2><button id="download" disabled>Download .txt</button></div>
+    <pre id="output"></pre><div id="validation"></div>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
