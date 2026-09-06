@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
 
+const CHATGPT_URL = 'https://chatgpt.com/';
 const SYSTEM_PROMPT = `You are a scholarly Sanskrit-to-English translator working on an OCR Sanskrit text.
 Translate ONLY the supplied units.
 
@@ -26,23 +27,28 @@ function parseJson(text) {
   return JSON.parse(cleaned);
 }
 
-async function findComposer(page) {
-  const candidates = [
+async function findComposer(page, timeoutMs = 120000) {
+  const selectors = [
     'textarea',
     '[contenteditable="true"]',
     'div[role="textbox"]'
   ];
-  for (const selector of candidates) {
-    const loc = page.locator(selector);
-    const count = await loc.count();
-    if (count) {
+  const started = Date.now();
+
+  while (Date.now() - started < timeoutMs) {
+    for (const selector of selectors) {
+      const loc = page.locator(selector);
+      const count = await loc.count().catch(() => 0);
+      if (!count) continue;
       for (let i = count - 1; i >= 0; i--) {
         const item = loc.nth(i);
         if (await item.isVisible().catch(() => false)) return item;
       }
     }
+    await page.waitForTimeout(500);
   }
-  throw new Error('Could not find the ChatGPT message composer. Open a normal ChatGPT chat and try again.');
+
+  throw new Error(`Could not find the ChatGPT message composer after ${Math.round(timeoutMs / 1000)} seconds. Check that ChatGPT is loaded and you are signed in.`);
 }
 
 async function sendMessage(page, prompt) {
@@ -124,22 +130,49 @@ export class ChatGPTBrowser {
 
   async connect() {
     this.log('Starting ChatGPT browser automation…');
+    this.log(`Using persistent browser profile: ${this.profileDir}`);
+
     this.context = await chromium.launchPersistentContext(this.profileDir, {
       headless: this.headless,
       viewport: { width: 1440, height: 1000 },
       args: ['--disable-blink-features=AutomationControlled']
     });
+
     this.browser = this.context.browser();
     this.page = this.context.pages()[0] || await this.context.newPage();
-    await this.page.goto('https://chatgpt.com/', {waitUntil: 'domcontentloaded', timeout: 60000});
-    await this.page.waitForTimeout(1500);
-    this.log(`ChatGPT page: ${this.page.url()}`);
-    if (/auth|login/i.test(this.page.url())) {
-      this.log('ChatGPT is not signed in. Sign in in the opened browser window; automation will wait.');
-      await this.page.waitForURL(/chatgpt\.com\/(?!auth|login)/i, {timeout: 300000}).catch(() => {});
-      if (/auth|login/i.test(this.page.url())) throw new Error('ChatGPT sign-in was not completed.');
+
+    // Do not wait for DOMContentLoaded here. ChatGPT can keep loading network
+    // resources for a long time, which caused a false startup failure even
+    // though the page was already usable. `commit` only waits for navigation
+    // to be committed, after which we independently wait for the composer.
+    this.log('Opening ChatGPT…');
+    try {
+      await this.page.goto(CHATGPT_URL, {waitUntil: 'commit', timeout: 30000});
+      this.log(`Navigation committed: ${this.page.url()}`);
+    } catch (error) {
+      if (/timeout/i.test(String(error?.message || error))) {
+        this.log('Initial navigation timed out, but the browser may still be loading ChatGPT. Continuing to wait for the page…');
+      } else {
+        throw error;
+      }
     }
-    await findComposer(this.page);
+
+    await this.page.waitForTimeout(2000);
+    this.log(`Current ChatGPT URL: ${this.page.url()}`);
+
+    if (/auth|login/i.test(this.page.url())) {
+      this.log('ChatGPT is not signed in. Sign in in the opened browser window; automation will wait up to 5 minutes.');
+      try {
+        await this.page.waitForURL(/chatgpt\.com\/(?!auth|login)/i, {timeout: 300000});
+      } catch {
+        // The URL can remain unchanged after authentication while the app
+        // becomes usable, so composer detection below is the real readiness check.
+      }
+      this.log(`URL after sign-in wait: ${this.page.url()}`);
+    }
+
+    this.log('Waiting for the ChatGPT message composer…');
+    await findComposer(this.page, 120000);
     this.log('ChatGPT composer detected. Ready.');
   }
 
@@ -167,6 +200,8 @@ export class ChatGPTBrowser {
 
   async close() {
     if (this.context) await this.context.close().catch(() => {});
-    this.context = null; this.browser = null; this.page = null;
+    this.context = null;
+    this.browser = null;
+    this.page = null;
   }
 }
