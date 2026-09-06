@@ -42,6 +42,15 @@ function pageGroups(units) {
   return [...groups.entries()].map(([page, items]) => ({page, units: items}));
 }
 
+function compiledOutput(compiledPages) {
+  const units = [];
+  for (const group of compiledPages) {
+    units.push({type:'page', source:`--- Page ${group.page} ---`});
+    units.push(...group.units);
+  }
+  return formatOutput(units);
+}
+
 async function body(req) {
   const chunks=[];
   for await (const c of req) chunks.push(c);
@@ -79,6 +88,7 @@ async function runJob(job) {
     await driver.connect();
 
     const byId = new Map(job.units.map(u => [u.id, u]));
+    const compiledPages = [];
     for (let i = 0; i < job.pages.length; i++) {
       if (job.cancelled) throw new Error('Translation cancelled by user.');
       const group = job.pages[i];
@@ -86,8 +96,15 @@ async function runJob(job) {
       event(job, 'page-start', `Starting page ${group.page}/${job.totalPages} — one ChatGPT batch.`, {page: group.page, completed: i});
       const translated = await driver.translatePage(group.units, group.page, job.totalPages);
       for (const item of translated) byId.set(item.id, item);
+      compiledPages.push({page: group.page, units: translated});
       job.completedPages = i + 1;
-      event(job, 'page-done', `Page ${group.page}/${job.totalPages} translated and received.`, {page: group.page, completed: job.completedPages, total: job.totalPages});
+      const liveCompiledOutput = compiledOutput(compiledPages);
+      event(job, 'page-done', `Page ${group.page}/${job.totalPages} translated and received.`, {
+        page: group.page,
+        completed: job.completedPages,
+        total: job.totalPages,
+        compiledOutput: liveCompiledOutput
+      });
       const partial = [...byId.values()];
       job.partialUnits = partial;
       const partialOutput = formatOutput(job.units.map(u => byId.get(u.id) || u));
